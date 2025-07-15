@@ -34,8 +34,8 @@ However, given my very little experience with Go as at when I started working on
 ### 1. Clone the Repository
 
 ```bash
-git clone <repository-url>
-cd web-crawler
+git clone https://github.com/LuminousIT/Sykell-Backend.git
+cd Sykell-Backend
 ```
 
 ### 2. Install Dependencies
@@ -589,10 +589,6 @@ volumes:
 3. Commit your changes (`git commit -m 'Add amazing feature'`)
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
-
-## License
-
-This project is licensed under the MIT License.
 
 ## Troubleshooting
 
