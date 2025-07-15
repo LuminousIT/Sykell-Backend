@@ -24,6 +24,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/gorilla/websocket"
+
 	_ "github.com/lib/pq" // PostgreSQL driver
 	"golang.org/x/crypto/bcrypt"
 )
@@ -71,17 +72,17 @@ type CrawlJob struct {
 }
 
 type CrawlResult struct {
-	ID            int                `json:"id" db:"id"`
-	JobID         string             `json:"job_id" db:"job_id"`
-	UserID        int                `json:"user_id" db:"user_id"`
-	URL           string             `json:"url" db:"url"`
-	HTMLVersion   string             `json:"html_version" db:"html_version"`
-	Title         string             `json:"title" db:"title"`
-	HeadingCounts map[string]int     `json:"heading_counts" db:"heading_counts"`
-	LinkAnalysis  []InaccessibleLink `json:"link_analysis" db:"link_analysis"`
-	HasLoginForm  bool               `json:"has_login_form" db:"has_login_form"`
-	Error         string             `json:"error,omitempty" db:"error"`
-	CrawledAt     time.Time          `json:"crawled_at" db:"crawled_at"`
+	ID            int            `json:"id" db:"id"`
+	JobID         string         `json:"job_id" db:"job_id"`
+	UserID        int            `json:"user_id" db:"user_id"`
+	URL           string         `json:"url" db:"url"`
+	HTMLVersion   string         `json:"html_version" db:"html_version"`
+	Title         string         `json:"title" db:"title"`
+	HeadingCounts map[string]int `json:"heading_counts" db:"heading_counts"`
+	LinkAnalysis  LinkAnalysis   `json:"link_analysis" db:"link_analysis"`
+	HasLoginForm  bool           `json:"has_login_form" db:"has_login_form"`
+	Error         string         `json:"error,omitempty" db:"error"`
+	CrawledAt     time.Time      `json:"crawled_at" db:"crawled_at"`
 }
 
 // Request/Response Models
@@ -103,6 +104,16 @@ type CrawlRequest struct {
 type JobControlRequest struct {
 	JobID  string `json:"job_id,omitempty"`
 	Action string `json:"action" binding:"required"` // "stop", "start", "cancel"
+}
+
+type RerunRequest struct {
+	URLs []string `json:"urls" binding:"required,min=1,max=50"`
+}
+
+type DeleteRequest struct {
+	URLs    []string `json:"urls,omitempty"`
+	JobIDs  []string `json:"job_ids,omitempty"`
+	Results []int    `json:"result_ids,omitempty"` // Individual result IDs
 }
 
 type HeadingCount struct {
@@ -822,7 +833,7 @@ func (ds *DatabaseService) GetCachedCrawlResult(userID int, url string) (*PageIn
 }
 
 func (ds *DatabaseService) GetUserCrawlHistory(userID int, limit int) ([]CrawlResult, error) {
-	query := `SELECT id, url, html_version, title, heading_counts, link_analysis, has_login_form, error, crawled_at
+	query := `SELECT id, job_id, url, html_version, title, heading_counts, link_analysis, has_login_form, error, crawled_at
 			  FROM crawl_results 
 			  WHERE user_id = $1 
 			  ORDER BY crawled_at DESC 
@@ -839,14 +850,19 @@ func (ds *DatabaseService) GetUserCrawlHistory(userID int, limit int) ([]CrawlRe
 		var result CrawlResult
 		var headingCountsJSON, linkAnalysisJSON []byte
 		var errorStr sql.NullString
+		var jobID sql.NullString
 
 		err := rows.Scan(
-			&result.ID, &result.URL, &result.HTMLVersion, &result.Title,
+			&result.ID, &jobID, &result.URL, &result.HTMLVersion, &result.Title,
 			&headingCountsJSON, &linkAnalysisJSON, &result.HasLoginForm,
 			&errorStr, &result.CrawledAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan crawl result: %w", err)
+		}
+
+		if jobID.Valid {
+			result.JobID = jobID.String
 		}
 
 		if errorStr.Valid {
@@ -861,6 +877,133 @@ func (ds *DatabaseService) GetUserCrawlHistory(userID int, limit int) ([]CrawlRe
 	}
 
 	return results, nil
+}
+
+func (ds *DatabaseService) DeleteCrawlResultsByURLs(userID int, urls []string) error {
+	if len(urls) == 0 {
+		return nil
+	}
+
+	// Create placeholder string for IN clause
+	placeholders := make([]string, len(urls))
+	args := make([]interface{}, len(urls)+1)
+	args[0] = userID
+
+	for i, url := range urls {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args[i+1] = url
+	}
+
+	query := fmt.Sprintf(`DELETE FROM crawl_results 
+						  WHERE user_id = $1 AND url IN (%s)`,
+		strings.Join(placeholders, ","))
+
+	_, err := ds.db.Exec(query, args...)
+	return err
+}
+
+func (ds *DatabaseService) DeleteCrawlResultsByJobIDs(userID int, jobIDs []string) error {
+	if len(jobIDs) == 0 {
+		return nil
+	}
+
+	// Create placeholder string for IN clause
+	placeholders := make([]string, len(jobIDs))
+	args := make([]interface{}, len(jobIDs)+1)
+	args[0] = userID
+
+	for i, jobID := range jobIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args[i+1] = jobID
+	}
+
+	query := fmt.Sprintf(`DELETE FROM crawl_results 
+						  WHERE user_id = $1 AND job_id IN (%s)`,
+		strings.Join(placeholders, ","))
+
+	_, err := ds.db.Exec(query, args...)
+	return err
+}
+
+func (ds *DatabaseService) DeleteCrawlResultsByIDs(userID int, resultIDs []int) error {
+	if len(resultIDs) == 0 {
+		return nil
+	}
+
+	// Create placeholder string for IN clause
+	placeholders := make([]string, len(resultIDs))
+	args := make([]interface{}, len(resultIDs)+1)
+	args[0] = userID
+
+	for i, resultID := range resultIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args[i+1] = resultID
+	}
+
+	query := fmt.Sprintf(`DELETE FROM crawl_results 
+						  WHERE user_id = $1 AND id IN (%s)`,
+		strings.Join(placeholders, ","))
+
+	_, err := ds.db.Exec(query, args...)
+	return err
+}
+
+func (ds *DatabaseService) DeleteJobsByIDs(userID int, jobIDs []string) error {
+	if len(jobIDs) == 0 {
+		return nil
+	}
+
+	// Create placeholder string for IN clause
+	placeholders := make([]string, len(jobIDs))
+	args := make([]interface{}, len(jobIDs)+1)
+	args[0] = userID
+
+	for i, jobID := range jobIDs {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args[i+1] = jobID
+	}
+
+	// Delete crawl results first (if not using CASCADE)
+	resultQuery := fmt.Sprintf(`DELETE FROM crawl_results 
+								WHERE user_id = $1 AND job_id IN (%s)`,
+		strings.Join(placeholders, ","))
+	_, err := ds.db.Exec(resultQuery, args...)
+	if err != nil {
+		return err
+	}
+
+	// Delete jobs
+	jobQuery := fmt.Sprintf(`DELETE FROM crawl_jobs 
+							 WHERE user_id = $1 AND id IN (%s)`,
+		strings.Join(placeholders, ","))
+	_, err = ds.db.Exec(jobQuery, args...)
+	return err
+}
+
+func (ds *DatabaseService) ClearUserCrawlCache(userID int, urls []string) error {
+	if len(urls) == 0 {
+		// Clear all cache for user
+		query := `DELETE FROM crawl_results WHERE user_id = $1 AND job_id IS NULL`
+		_, err := ds.db.Exec(query, userID)
+		return err
+	}
+
+	// Clear cache for specific URLs
+	placeholders := make([]string, len(urls))
+	args := make([]interface{}, len(urls)+1)
+	args[0] = userID
+
+	for i, url := range urls {
+		placeholders[i] = fmt.Sprintf("$%d", i+2)
+		args[i+1] = url
+	}
+
+	query := fmt.Sprintf(`DELETE FROM crawl_results 
+						  WHERE user_id = $1 AND job_id IS NULL AND url IN (%s)`,
+		strings.Join(placeholders, ","))
+
+	_, err := ds.db.Exec(query, args...)
+	return err
 }
 
 func (ds *DatabaseService) Close() error {
@@ -1382,6 +1525,147 @@ func healthHandler(c *gin.Context) {
 	})
 }
 
+// Re-run analysis handler
+func rerunAnalysisHandler(jobManager *JobManager, db *DatabaseService) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req RerunRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		userID := c.GetInt("user_id")
+
+		// Clear existing cache for these URLs
+		if err := db.ClearUserCrawlCache(userID, req.URLs); err != nil {
+			log.Printf("Warning: Failed to clear cache: %v", err)
+		}
+
+		// Create new job for re-analysis
+		job, err := jobManager.CreateJob(userID, req.URLs)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create re-analysis job"})
+			return
+		}
+
+		// Start job immediately
+		if err := jobManager.StartJob(job.ID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start re-analysis job"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"job_id":  job.ID,
+			"status":  "started",
+			"message": "Re-analysis job started. Previous results cleared from cache.",
+			"urls":    req.URLs,
+		})
+	}
+}
+
+// Delete selected data handler
+func deleteDataHandler(db *DatabaseService, jobManager *JobManager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var req DeleteRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		userID := c.GetInt("user_id")
+		var deletedCount int
+		var errors []string
+
+		// Delete by URLs
+		if len(req.URLs) > 0 {
+			if err := db.DeleteCrawlResultsByURLs(userID, req.URLs); err != nil {
+				errors = append(errors, fmt.Sprintf("Failed to delete URLs: %v", err))
+			} else {
+				deletedCount += len(req.URLs)
+			}
+		}
+
+		// Delete by Job IDs (also stops running jobs)
+		if len(req.JobIDs) > 0 {
+			// First stop any running jobs
+			for _, jobID := range req.JobIDs {
+				if err := jobManager.StopJob(jobID); err != nil {
+					// Job might not be running, that's okay
+					log.Printf("Note: Could not stop job %s: %v", jobID, err)
+				}
+			}
+
+			if err := db.DeleteJobsByIDs(userID, req.JobIDs); err != nil {
+				errors = append(errors, fmt.Sprintf("Failed to delete jobs: %v", err))
+			} else {
+				deletedCount += len(req.JobIDs)
+			}
+		}
+
+		// Delete by Result IDs
+		if len(req.Results) > 0 {
+			if err := db.DeleteCrawlResultsByIDs(userID, req.Results); err != nil {
+				errors = append(errors, fmt.Sprintf("Failed to delete results: %v", err))
+			} else {
+				deletedCount += len(req.Results)
+			}
+		}
+
+		if len(errors) > 0 {
+			c.JSON(http.StatusPartialContent, gin.H{
+				"message":       "Partial deletion completed",
+				"deleted_count": deletedCount,
+				"errors":        errors,
+			})
+			return
+		}
+
+		if deletedCount == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "No valid deletion criteria provided",
+			})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message":       "Deletion completed successfully",
+			"deleted_count": deletedCount,
+		})
+	}
+}
+
+// Clear all history handler
+func clearAllHistoryHandler(db *DatabaseService, jobManager *JobManager) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		userID := c.GetInt("user_id")
+
+		// Stop all running jobs first
+		if err := jobManager.StopAllJobs(userID); err != nil {
+			log.Printf("Warning: Failed to stop all jobs: %v", err)
+		}
+
+		// Delete all crawl results
+		query := `DELETE FROM crawl_results WHERE user_id = $1`
+		_, err := db.db.Exec(query, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to clear crawl results"})
+			return
+		}
+
+		// Delete all jobs
+		jobQuery := `DELETE FROM crawl_jobs WHERE user_id = $1`
+		_, err = db.db.Exec(jobQuery, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to clear jobs"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{
+			"message": "All crawl history and jobs cleared successfully",
+		})
+	}
+}
+
 // WebSocket Handler
 func wsHandler(connMgr *ConnectionManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -1476,6 +1760,10 @@ func main() {
 		protected.GET("/jobs", jobsHandler(db))
 		protected.GET("/jobs/history", jobsHistoryHandler(db))
 		protected.GET("/history", historyHandler(db))
+
+		protected.POST("/rerun", rerunAnalysisHandler(jobManager, db))
+		protected.DELETE("/data", deleteDataHandler(db, jobManager))
+		protected.DELETE("/history/clear", clearAllHistoryHandler(db, jobManager))
 	}
 
 	// Start server
