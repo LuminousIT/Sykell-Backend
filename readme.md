@@ -1,6 +1,12 @@
+
 # Web Crawler API
 
 A powerful, concurrent web crawler API built with Go that analyzes web pages and provides detailed insights including HTML structure, heading counts, link analysis, and login form detection. Features real-time job tracking via WebSockets, user authentication, and comprehensive data management.
+
+### Important Note: 
+The [Frontend Version](https://github.com/LuminousIT/Sykell-Webcrawler) of this project was completely developed **without** AI coding assistance.
+
+However, given my very little experience with Go as at when I started working on this project, I leveraged the use of Claude-AI as an assistive coding tech in the development of this `.go backend` project. 
 
 ## Features
 
